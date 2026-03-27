@@ -106,7 +106,8 @@ def check_amo():
     try:
         data = amo_get(BASE + "/api/v4/leads", {
             "limit": 50,
-            "order[id]": "desc"
+            "order[id]": "desc",
+            "with": "contacts"
         })
         leads = data.get("_embedded", {}).get("leads", [])
         for lead in leads:
@@ -131,12 +132,29 @@ def check_amo():
             price   = lead.get("price") or 0
             created = datetime.fromtimestamp(lead.get("created_at", 0)).strftime("%d.%m %H:%M")
 
+            # Получаем телефон из привязанного контакта
+            phone = "—"
+            try:
+                contacts = lead.get("_embedded", {}).get("contacts", [])
+                if contacts:
+                    contact_id = contacts[0]["id"]
+                    contact_data = amo_get(BASE + "/api/v4/contacts/" + str(contact_id))
+                    for f in (contact_data.get("custom_fields_values") or []):
+                        if f.get("field_code") == "PHONE":
+                            vals = f.get("values", [])
+                            if vals:
+                                phone = vals[0].get("value", "—")
+                            break
+            except Exception as e:
+                print("Ошибка получения телефона:", e)
+
             lead_info = {
                 "id": lid,
                 "name": name,
                 "channel": channel,
                 "city": city,
                 "price": price,
+                "phone": phone,
                 "manager": manager["name"],
                 "created": created,
                 "url": "https://" + AMO_DOMAIN + "/leads/detail/" + str(lid)
