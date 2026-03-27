@@ -104,11 +104,9 @@ def check_amo():
     if not AMO_TOKEN:
         return
     try:
-        since = int(time.time()) - 120
         data = amo_get(BASE + "/api/v4/leads", {
             "limit": 50,
-            "filter[created_at][from]": since,
-            "order[created_at]": "asc"
+            "order[id]": "desc"
         })
         leads = data.get("_embedded", {}).get("leads", [])
         for lead in leads:
