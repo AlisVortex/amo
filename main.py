@@ -119,13 +119,9 @@ def check_amo():
             if channel.lower() not in TARGET_VALUES:
                 continue
 
-            # Назначаем менеджера по round-robin
+            # Определяем следующего менеджера по round-robin (только для уведомления)
             manager = MANAGERS[next_manager_idx % len(MANAGERS)]
             next_manager_idx = (next_manager_idx + 1) % len(MANAGERS)
-            try:
-                amo_patch(BASE + "/api/v4/leads/" + str(lid), {"responsible_user_id": manager["id"]})
-            except Exception as e:
-                print("Ошибка назначения:", e)
 
             city    = get_field(lead, CITY_FIELD_ID) or "—"
             name    = lead.get("name") or "Без названия"
