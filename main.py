@@ -110,6 +110,7 @@ def check_amo():
             "with": "contacts"
         })
         leads = data.get("_embedded", {}).get("leads", [])
+        print("Проверка: получено " + str(len(leads)) + " сделок, в очереди " + str(len(processed_ids)))
         for lead in leads:
             lid = lead["id"]
             if lid in processed_ids:
@@ -171,15 +172,25 @@ def check_amo():
 
 # Запускаем планировщик
 load_state()
-scheduler = BackgroundScheduler()
-scheduler.add_job(check_amo, "interval", seconds=60)
+scheduler = BackgroundScheduler(daemon=True)
+scheduler.add_job(check_amo, "interval", seconds=60, max_instances=1)
 scheduler.start()
+
+# Сразу запускаем первую проверку при старте
+import threading
+threading.Timer(5, check_amo).start()
 
 # ========== API endpoints ==========
 
 @app.get("/")
 def root():
     return {"status": "ok", "leads": len(recent_leads)}
+
+@app.get("/api/ping")
+def ping():
+    """Endpoint для keepalive — вызывается извне каждые 5 минут"""
+    check_amo()
+    return {"status": "ok", "leads": len(recent_leads), "time": datetime.now().isoformat()}
 
 @app.get("/api/leads")
 def get_leads():
