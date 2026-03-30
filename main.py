@@ -104,7 +104,7 @@ def send_push_all(title, body, data=None):
     subscriptions = [s for s in subscriptions if s not in dead]
 
 def check_amo():
-    global next_manager_idx, processed_ids, leads_by_phone
+    global processed_ids, leads_by_phone
     if not AMO_TOKEN:
         return
     try:
@@ -146,8 +146,11 @@ def check_amo():
             if not is_pr and not is_tilda:
                 continue
 
-            manager = MANAGERS[next_manager_idx % len(MANAGERS)]
-            next_manager_idx = (next_manager_idx + 1) % len(MANAGERS)
+            # Берём реального ответственного из AmoCRM
+            responsible_id = lead.get("responsible_user_id")
+            manager_name = user_map.get(responsible_id, "—")
+            # Если ответственный не из нашего списка — показываем его имя как есть
+            manager = {"name": manager_name}
 
             city    = get_field(lead, CITY_FIELD_ID) or "—"
             name    = lead.get("name") or "Без названия"
