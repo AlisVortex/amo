@@ -104,12 +104,20 @@ def check_amo():
     if not AMO_TOKEN:
         return
     try:
-        data = amo_get(BASE + "/api/v4/leads", {
-            "limit": 50,
-            "order[id]": "desc",
-            "with": "contacts"
-        })
-        leads = data.get("_embedded", {}).get("leads", [])
+        # Берём последние 250 сделок постранично
+        all_leads = []
+        for page in range(1, 4):
+            data = amo_get(BASE + "/api/v4/leads", {
+                "limit": 250,
+                "page": page,
+                "order[id]": "desc",
+                "with": "contacts"
+            })
+            page_leads = data.get("_embedded", {}).get("leads", [])
+            all_leads.extend(page_leads)
+            if len(page_leads) < 250:
+                break
+        leads = all_leads
         print("Проверка: получено " + str(len(leads)) + " сделок, в очереди " + str(len(processed_ids)))
         for lead in leads:
             lid = lead["id"]
