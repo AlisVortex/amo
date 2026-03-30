@@ -126,7 +126,12 @@ def check_amo():
                 continue
             processed_ids.add(lid)
             channel = get_field(lead, CHANNEL_FIELD_ID)
-            if channel.lower() not in TARGET_VALUES:
+            source  = get_field(lead, SOURCE_FIELD_ID)
+            
+            is_pr = channel.lower() in TARGET_VALUES
+            is_tilda = "тильда" in source.lower()
+            
+            if not is_pr and not is_tilda:
                 continue
 
             # Определяем следующего менеджера по round-robin (только для уведомления)
@@ -134,7 +139,8 @@ def check_amo():
             next_manager_idx = (next_manager_idx + 1) % len(MANAGERS)
 
             city    = get_field(lead, CITY_FIELD_ID) or "—"
-            source  = get_field(lead, SOURCE_FIELD_ID) or "—"
+            if not source:
+                source = "—"
             name    = lead.get("name") or "Без названия"
             price   = lead.get("price") or 0
             created = datetime.fromtimestamp(lead.get("created_at", 0)).strftime("%d.%m %H:%M")
