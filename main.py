@@ -105,16 +105,21 @@ def check_amo():
     if not AMO_TOKEN:
         return
     try:
-        # Берём последние 250 сделок постранично
+        # Берём сделки за последние 60 дней
+        import time as _time
+        since_60d = int(_time.time()) - 60 * 86400
         all_leads = []
-        for page in range(1, 4):
+        for page in range(1, 10):
             data = amo_get(BASE + "/api/v4/leads", {
                 "limit": 250,
                 "page": page,
                 "order[id]": "desc",
-                "with": "contacts"
+                "with": "contacts",
+                "filter[created_at][from]": since_60d
             })
             page_leads = data.get("_embedded", {}).get("leads", [])
+            if not page_leads:
+                break
             all_leads.extend(page_leads)
             if len(page_leads) < 250:
                 break
