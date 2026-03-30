@@ -1,6 +1,5 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pywebpush import webpush, WebPushException
 from apscheduler.schedulers.background import BackgroundScheduler
 import requests as req
@@ -10,13 +9,7 @@ import time
 from datetime import datetime
 
 app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ========== НАСТРОЙКИ ==========
 AMO_DOMAIN       = os.getenv("AMO_DOMAIN", "etalongroup.amocrm.ru")
@@ -42,30 +35,19 @@ MANAGERS = [
 BASE = "https://" + AMO_DOMAIN
 AMO_HEADERS = {"Authorization": "Bearer " + AMO_TOKEN}
 
-# Хранилище в памяти
-subscriptions = []       # push-подписки устройств
-processed_ids = set()    # уже обработанные лиды
-next_manager_idx = 0     # счётчик round-robin
-recent_leads = []        # последние 50 лидов для отображения
+subscriptions    = []
+processed_ids    = set()
+next_manager_idx = 0
+# Хранилище лидов: ключ = номер телефона (или id если телефона нет)
+# Значение = последний лид с этим телефоном
+leads_by_phone = {}  # phone -> lead_info
 
-STATE_FILE = "state.json"
-
-def load_state():
-    global processed_ids, next_manager_idx, recent_leads
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
-            s = json.load(f)
-            processed_ids = set(s.get("processed_ids", []))
-            next_manager_idx = s.get("next_manager_idx", 0)
-            recent_leads = s.get("recent_leads", [])
-
-def save_state():
-    with open(STATE_FILE, "w") as f:
-        json.dump({
-            "processed_ids": list(processed_ids)[-2000:],
-            "next_manager_idx": next_manager_idx,
-            "recent_leads": recent_leads[-50:]
-        }, f)
+def get_leads_list():
+    """Возвращает дедуплицированный список лидов, отсортированный по дате (новые первые)"""
+    seen = {}
+    for phone, lead in leads_by_phone.items():
+        seen[phone] = lead
+    return sorted(seen.values(), key=lambda x: x.get("created_ts", 0), reverse=True)
 
 def amo_get(url, params=None):
     r = req.get(url, headers=AMO_HEADERS, params=params, timeout=15)
@@ -84,6 +66,15 @@ def get_field(deal, field_id):
                 return vals[0].get("value", "")
     return ""
 
+def normalize_phone(phone):
+    """Нормализуем телефон для сравнения — только цифры"""
+    if not phone or phone == "—":
+        return None
+    digits = "".join(c for c in phone if c.isdigit())
+    if len(digits) >= 10:
+        return digits[-10:]  # последние 10 цифр
+    return None
+
 def send_push_all(title, body, data=None):
     global subscriptions
     dead = []
@@ -98,16 +89,16 @@ def send_push_all(title, body, data=None):
         except WebPushException as e:
             if e.response and e.response.status_code in (404, 410):
                 dead.append(sub)
+        except Exception as e:
+            print("Push error:", e)
     subscriptions = [s for s in subscriptions if s not in dead]
 
 def check_amo():
-    global next_manager_idx, processed_ids, recent_leads
+    global next_manager_idx, processed_ids, leads_by_phone
     if not AMO_TOKEN:
         return
     try:
-        # Берём сделки за последние 60 дней
-        import time as _time
-        since_60d = int(_time.time()) - 60 * 86400
+        since_60d = int(time.time()) - 60 * 86400
         all_leads = []
         for page in range(1, 10):
             data = amo_get(BASE + "/api/v4/leads", {
@@ -123,35 +114,34 @@ def check_amo():
             all_leads.extend(page_leads)
             if len(page_leads) < 250:
                 break
-        leads = all_leads
-        print("Проверка: получено " + str(len(leads)) + " сделок, в очереди " + str(len(processed_ids)))
-        for lead in leads:
+
+        print("Проверка: получено " + str(len(all_leads)) + " сделок за 60 дней")
+
+        new_count = 0
+        for lead in all_leads:
             lid = lead["id"]
             if lid in processed_ids:
                 continue
             processed_ids.add(lid)
+
             channel = get_field(lead, CHANNEL_FIELD_ID)
             source  = get_field(lead, SOURCE_FIELD_ID)
-            
-            is_pr = channel.lower() in TARGET_VALUES
-            is_tilda = "тильда" in source.lower()
-            
+            is_pr     = channel.lower() in TARGET_VALUES
+            is_tilda  = "тильда" in source.lower()
             if not is_pr and not is_tilda:
                 continue
 
-            # Определяем следующего менеджера по round-robin (только для уведомления)
             manager = MANAGERS[next_manager_idx % len(MANAGERS)]
             next_manager_idx = (next_manager_idx + 1) % len(MANAGERS)
 
             city    = get_field(lead, CITY_FIELD_ID) or "—"
-            if not source:
-                source = "—"
             name    = lead.get("name") or "Без названия"
             price   = lead.get("price") or 0
-            created = datetime.fromtimestamp(lead.get("created_at", 0)).strftime("%d.%m %H:%M")
+            created_ts = lead.get("created_at", 0)
+            created = datetime.fromtimestamp(created_ts).strftime("%d.%m %H:%M") if created_ts else "—"
 
-            # Получаем телефон из привязанного контакта
-            phone = "—"
+            # Получаем телефон
+            phone_raw = "—"
             try:
                 contacts = lead.get("_embedded", {}).get("contacts", [])
                 if contacts:
@@ -161,7 +151,7 @@ def check_amo():
                         if f.get("field_code") == "PHONE":
                             vals = f.get("values", [])
                             if vals:
-                                phone = vals[0].get("value", "—")
+                                phone_raw = vals[0].get("value", "—")
                             break
             except Exception as e:
                 print("Ошибка получения телефона:", e)
@@ -172,51 +162,57 @@ def check_amo():
                 "channel": channel,
                 "city": city,
                 "price": price,
-                "phone": phone,
-                "source": source,
+                "phone": phone_raw,
+                "source": source or "—",
                 "manager": manager["name"],
                 "created": created,
+                "created_ts": created_ts,
                 "url": "https://" + AMO_DOMAIN + "/leads/detail/" + str(lid)
             }
-            recent_leads.insert(0, lead_info)
-            recent_leads = recent_leads[:50]
 
-            # Отправляем push всем подписанным устройствам
-            body = channel + " · " + city + "\n👤 " + manager["name"]
-            if price:
-                body += " · " + str(price) + " р."
-            send_push_all("🔔 Новый лид: " + name, body, lead_info)
-            print("[" + created + "] Новый лид #" + str(lid) + " → " + manager["name"])
+            # Дедупликация по телефону — оставляем последнюю сделку
+            phone_key = normalize_phone(phone_raw)
+            if phone_key:
+                existing = leads_by_phone.get(phone_key)
+                if existing and existing.get("created_ts", 0) > created_ts:
+                    # Уже есть более новая сделка с этим телефоном — пропускаем
+                    continue
+                leads_by_phone[phone_key] = lead_info
+            else:
+                # Нет телефона — используем ID как ключ
+                leads_by_phone["id_" + str(lid)] = lead_info
 
-        save_state()
+            new_count += 1
+
+            # Push только для действительно новых лидов (за последние 2 минуты)
+            if created_ts and (time.time() - created_ts) < 120:
+                body_text = channel + " · " + city + "\n👤 " + manager["name"]
+                if phone_raw and phone_raw != "—":
+                    body_text += "\n📞 " + phone_raw
+                send_push_all("🔔 Новый лид: " + name, body_text, lead_info)
+                print("[" + created + "] Новый лид #" + str(lid) + " → " + manager["name"])
+
+        if new_count:
+            print("Добавлено/обновлено лидов: " + str(new_count))
+
     except Exception as e:
         print("Ошибка проверки AmoCRM:", e)
 
 # Запускаем планировщик
-load_state()
-scheduler = BackgroundScheduler(daemon=True)
+scheduler = BackgroundScheduler()
 scheduler.add_job(check_amo, "interval", seconds=60, max_instances=1)
 scheduler.start()
+check_amo()  # первый запуск сразу
 
-# Сразу запускаем первую проверку при старте
-import threading
-threading.Timer(5, check_amo).start()
-
-# ========== API endpoints ==========
+# ========== API ==========
 
 @app.get("/")
 def root():
-    return {"status": "ok", "leads": len(recent_leads)}
-
-@app.get("/api/ping")
-def ping():
-    """Endpoint для keepalive — вызывается извне каждые 5 минут"""
-    check_amo()
-    return {"status": "ok", "leads": len(recent_leads), "time": datetime.now().isoformat()}
+    return {"status": "ok", "leads": len(leads_by_phone)}
 
 @app.get("/api/leads")
 def get_leads():
-    return {"leads": recent_leads}
+    return {"leads": get_leads_list()}
 
 @app.get("/api/vapid-public")
 def get_vapid_public():
@@ -239,3 +235,7 @@ async def unsubscribe(request: Request):
 @app.get("/api/managers")
 def get_managers():
     return {"managers": MANAGERS, "next": next_manager_idx % len(MANAGERS)}
+
+@app.get("/api/ping")
+def ping():
+    return {"ok": True}
