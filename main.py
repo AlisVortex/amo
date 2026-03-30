@@ -135,8 +135,7 @@ def check_amo():
         new_count = 0
         for lead in all_leads:
             lid = lead["id"]
-            if lid in processed_ids:
-                continue
+            is_new = lid not in processed_ids
             processed_ids.add(lid)
 
             channel = get_field(lead, CHANNEL_FIELD_ID)
@@ -146,10 +145,9 @@ def check_amo():
             if not is_pr and not is_tilda:
                 continue
 
-            # Берём реального ответственного из AmoCRM
+            # Берём реального ответственного из AmoCRM (всегда свежий)
             responsible_id = lead.get("responsible_user_id")
             manager_name = user_map.get(responsible_id, "—")
-            # Если ответственный не из нашего списка — показываем его имя как есть
             manager = {"name": manager_name}
 
             city    = get_field(lead, CITY_FIELD_ID) or "—"
@@ -188,27 +186,30 @@ def check_amo():
                 "url": "https://" + AMO_DOMAIN + "/leads/detail/" + str(lid)
             }
 
-            # Дедупликация по телефону — оставляем последнюю сделку
+            # Дедупликация по телефону — всегда обновляем ответственного
             phone_key = normalize_phone(phone_raw)
-            if phone_key:
-                existing = leads_by_phone.get(phone_key)
-                if existing and existing.get("created_ts", 0) > created_ts:
-                    # Уже есть более новая сделка с этим телефоном — пропускаем
-                    continue
-                leads_by_phone[phone_key] = lead_info
+            storage_key = phone_key if phone_key else "id_" + str(lid)
+
+            existing = leads_by_phone.get(storage_key)
+            if existing:
+                # Всегда обновляем ответственного — он мог смениться в AmoCRM
+                if existing.get("manager") != manager_name:
+                    print("Обновлён ответственный #" + str(lid) + ": " + existing.get("manager", "—") + " → " + manager_name)
+                existing["manager"] = manager_name
+                # Если это более новая сделка — заменяем полностью
+                if existing.get("created_ts", 0) < created_ts:
+                    leads_by_phone[storage_key] = lead_info
             else:
-                # Нет телефона — используем ID как ключ
-                leads_by_phone["id_" + str(lid)] = lead_info
+                leads_by_phone[storage_key] = lead_info
+                new_count += 1
 
-            new_count += 1
-
-            # Push только для действительно новых лидов (за последние 2 минуты)
-            if created_ts and (time.time() - created_ts) < 120:
-                body_text = channel + " · " + city + "\n👤 " + manager["name"]
+            # Push только для новых лидов (за последние 2 минуты)
+            if is_new and created_ts and (time.time() - created_ts) < 120:
+                body_text = channel + " · " + city + "\n👤 " + manager_name
                 if phone_raw and phone_raw != "—":
                     body_text += "\n📞 " + phone_raw
                 send_push_all("🔔 Новый лид: " + name, body_text, lead_info)
-                print("[" + created + "] Новый лид #" + str(lid) + " → " + manager["name"])
+                print("[" + created + "] Новый лид #" + str(lid) + " → " + manager_name)
 
         if new_count:
             print("Добавлено/обновлено лидов: " + str(new_count))
