@@ -23,6 +23,7 @@ AMO_DOMAIN       = os.getenv("AMO_DOMAIN", "etalongroup.amocrm.ru")
 AMO_TOKEN        = os.getenv("AMO_TOKEN", "")
 CHANNEL_FIELD_ID = 582110
 CITY_FIELD_ID    = 575680
+SOURCE_FIELD_ID  = 582898
 TARGET_VALUES    = ["pr лид", "pr входящий"]
 VAPID_PRIVATE    = os.getenv("VAPID_PRIVATE", "")
 VAPID_PUBLIC     = os.getenv("VAPID_PUBLIC", "")
@@ -133,6 +134,7 @@ def check_amo():
             next_manager_idx = (next_manager_idx + 1) % len(MANAGERS)
 
             city    = get_field(lead, CITY_FIELD_ID) or "—"
+            source  = get_field(lead, SOURCE_FIELD_ID) or "—"
             name    = lead.get("name") or "Без названия"
             price   = lead.get("price") or 0
             created = datetime.fromtimestamp(lead.get("created_at", 0)).strftime("%d.%m %H:%M")
@@ -160,6 +162,7 @@ def check_amo():
                 "city": city,
                 "price": price,
                 "phone": phone,
+                "source": source,
                 "manager": manager["name"],
                 "created": created,
                 "url": "https://" + AMO_DOMAIN + "/leads/detail/" + str(lid)
