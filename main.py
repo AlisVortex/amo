@@ -35,6 +35,16 @@ MANAGERS = [
 BASE = "https://" + AMO_DOMAIN
 AMO_HEADERS = {"Authorization": "Bearer " + AMO_TOKEN}
 
+# Загружаем менеджеров для архива
+def load_user_map():
+    try:
+        data = req.get(BASE + "/api/v4/users", headers=AMO_HEADERS, params={"limit": 250}, timeout=15).json()
+        return {u["id"]: u["name"] for u in data.get("_embedded", {}).get("users", [])}
+    except:
+        return {}
+
+user_map = {}
+
 subscriptions    = []
 processed_ids    = set()
 next_manager_idx = 0
@@ -98,15 +108,20 @@ def check_amo():
     if not AMO_TOKEN:
         return
     try:
-        since_60d = int(time.time()) - 60 * 86400
+        # Только сегодняшние сделки — с начала текущего дня (00:00 МСК = UTC-3)
+        from datetime import date
+        today_start = int(datetime.combine(date.today(), datetime.min.time()).timestamp())
+        # Небольшой запас — берём с вчера 20:00 UTC чтобы не пропустить ночные заявки
+        since = today_start - 4 * 3600
+
         all_leads = []
-        for page in range(1, 10):
+        for page in range(1, 5):
             data = amo_get(BASE + "/api/v4/leads", {
                 "limit": 250,
                 "page": page,
                 "order[id]": "desc",
                 "with": "contacts",
-                "filter[created_at][from]": since_60d
+                "filter[created_at][from]": since
             })
             page_leads = data.get("_embedded", {}).get("leads", [])
             if not page_leads:
@@ -115,7 +130,7 @@ def check_amo():
             if len(page_leads) < 250:
                 break
 
-        print("Проверка: получено " + str(len(all_leads)) + " сделок за 60 дней")
+        print("Проверка: получено " + str(len(all_leads)) + " сделок за сегодня")
 
         new_count = 0
         for lead in all_leads:
@@ -199,6 +214,7 @@ def check_amo():
         print("Ошибка проверки AmoCRM:", e)
 
 # Запускаем планировщик
+user_map.update(load_user_map())
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_amo, "interval", seconds=60, max_instances=1)
 scheduler.start()
@@ -239,3 +255,83 @@ def get_managers():
 @app.get("/api/ping")
 def ping():
     return {"ok": True}
+
+@app.get("/api/archive")
+def get_archive():
+    """Лиды за последние 60 дней — загружается один раз при открытии архива"""
+    try:
+        since_60d = int(time.time()) - 60 * 86400
+        all_leads = []
+        for page in range(1, 10):
+            data = amo_get(BASE + "/api/v4/leads", {
+                "limit": 250,
+                "page": page,
+                "order[id]": "desc",
+                "with": "contacts",
+                "filter[created_at][from]": since_60d
+            })
+            page_leads = data.get("_embedded", {}).get("leads", [])
+            if not page_leads:
+                break
+            all_leads.extend(page_leads)
+            if len(page_leads) < 250:
+                break
+
+        result = []
+        seen_phones = {}
+        for lead in all_leads:
+            channel = get_field(lead, CHANNEL_FIELD_ID)
+            source  = get_field(lead, SOURCE_FIELD_ID)
+            is_pr    = channel.lower() in TARGET_VALUES
+            is_tilda = "тильда" in source.lower()
+            if not is_pr and not is_tilda:
+                continue
+
+            city    = get_field(lead, CITY_FIELD_ID) or "—"
+            name    = lead.get("name") or "Без названия"
+            price   = lead.get("price") or 0
+            created_ts = lead.get("created_at", 0)
+            created = datetime.fromtimestamp(created_ts).strftime("%d.%m %H:%M") if created_ts else "—"
+
+            phone_raw = "—"
+            try:
+                contacts = lead.get("_embedded", {}).get("contacts", [])
+                if contacts:
+                    contact_id = contacts[0]["id"]
+                    contact_data = amo_get(BASE + "/api/v4/contacts/" + str(contact_id))
+                    for f in (contact_data.get("custom_fields_values") or []):
+                        if f.get("field_code") == "PHONE":
+                            vals = f.get("values", [])
+                            if vals:
+                                phone_raw = vals[0].get("value", "—")
+                            break
+            except:
+                pass
+
+            lead_info = {
+                "id": lead["id"],
+                "name": name,
+                "channel": channel,
+                "city": city,
+                "price": price,
+                "phone": phone_raw,
+                "source": source or "—",
+                "manager": user_map.get(lead.get("responsible_user_id"), "—"),
+                "created": created,
+                "created_ts": created_ts,
+                "url": "https://" + AMO_DOMAIN + "/leads/detail/" + str(lead["id"])
+            }
+
+            # Дедупликация по телефону
+            phone_key = normalize_phone(phone_raw)
+            if phone_key:
+                existing = seen_phones.get(phone_key)
+                if existing and existing.get("created_ts", 0) > created_ts:
+                    continue
+                seen_phones[phone_key] = lead_info
+            else:
+                seen_phones["id_" + str(lead["id"])] = lead_info
+
+        return {"leads": sorted(seen_phones.values(), key=lambda x: x.get("created_ts", 0), reverse=True)}
+    except Exception as e:
+        return {"leads": [], "error": str(e)}
